@@ -1,0 +1,301 @@
+---
+title: "RNAseq"
+author: "lipeipei0611"
+date: "2024-07-04"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Task: Using the publicly available bulk RNA-Seq data from GTEX (v8), identify biological pathways/processes specific to the liver. As what constitutes a biological pathway/process is open for interpretation, please use your preferred method / definition / approach (or multiple). For bonus points, identify putative transcriptional regulators of these pathways/processes. To ensure that you do not encounter memory issues please restrict your analyses to protein-coding genes and the following tissues: heart, kidney, liver, lung, muscle, pancreas, spleen, stomach, pituitary gland, and thyroid.
+
+
+## Load library
+```{r}
+library(tidyverse)
+library(data.table)
+library(RColorBrewer)
+library(umap)
+library(limma)
+library(ggrepel)
+library(msigdbr)
+library(GSVA)
+library(xlsx)
+library(readxl)
+library(GeneSummary)
+library(biomaRt)
+```
+
+## Data Prepare
+```{r}
+## GTEX RNAseq TPM data and sample information are downloaded from https://www.gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression
+tpm_dat <- fread("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct")
+
+
+## get tissue infor
+sample_infor <- fread("data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt") %>%
+  as.data.frame() %>%
+  filter(SMTS %in% c("Heart", "Kidney", "Liver", "Lung", "Muscle", "Pancreas", "Spleen", "Stomach", "Pituitary", "Thyroid")) %>%
+  filter(SAMPID %in% colnames(tpm_dat)) %>%
+  dplyr::select(c("SAMPID", "SMTS")) %>%
+  mutate(Grp = if_else(SMTS == "Liver", "Liver", "non-Liver"))
+sample_infor$Grp <- factor(sample_infor$Grp, levels=c("non-Liver", "Liver"))
+sample_infor_summary <- sample_infor %>%
+  group_by(SMTS) %>%
+  summarise(N=n()) %>%
+  ungroup()
+table(sample_infor$Grp)
+
+## The number of samples across tissues
+ggplot(sample_infor_summary, aes(x=SMTS, y=N, fill=SMTS)) +
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette = "Set3") +
+  labs(colour="black", x="", y="N") +
+  theme_bw(base_size=15) +
+  theme(panel.grid = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank(),
+        axis.text.x=element_text(angle = 90, vjust = 0.5, size = 12, hjust = 1, color = "black"),
+        axis.text.y=element_text(size=12, color=c("black")),
+        axis.line.x = element_line(colour = "black", size=0.5),
+        axis.line.y = element_line(colour = "black", size=0.5),
+        legend.position="none") 
+ggsave("output/sample_infor_summary.png", width = 6, height = 4)
+
+
+## get protein-coding genes
+genes <- unique(tpm_dat$Description)
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL", host = "useast.ensembl.org")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c("hgnc_symbol", "entrezgene_id", "ensembl_gene_id", "gene_biotype"),
+  filter = "hgnc_symbol",
+  values = genes,
+  uniqueRows=TRUE)
+genes_pc <- annotLookup %>%
+  filter(gene_biotype == "protein_coding") %>%
+   mutate(ID_Symbol = paste(ensembl_gene_id, hgnc_symbol, sep="_"))
+
+## filter tmp to protein-coding genes and selected tissues
+tpm_dat_filter <- tpm_dat %>%
+  as.data.frame() %>%
+  separate(Name, c("ID", "NO"), "\\.") %>%
+  mutate(ID_Symbol = paste(ID, Description, sep="_")) %>%
+  filter(ID_Symbol %in% genes_pc$ID_Symbol) %>%
+  dplyr::select(c("Description", sample_infor$SAMPID)) %>%
+  filter(rowSums(across(2:4422) == 0) <= 4420) %>%
+  column_to_rownames(., c("Description"))
+ltpm <- log2(as.matrix(tpm_dat_filter) + 0.001)
+
+
+## Transcription factor from https://pubmed.ncbi.nlm.nih.gov/29425488/
+tf <- read_excel("data/TRANSCRIPTION_FACTOR_mmc2.xlsx", 
+    sheet = "Table S1. Related to Figure 1B", 
+    skip = 1) %>%
+  filter(...4 == "Yes") %>%
+  mutate(Gene = Name) %>%
+  dplyr::select(c("Gene")) %>%
+  mutate(Class = "Transcription factor") %>%
+  distinct()
+
+## Transcription cofactor from https://tools.sschmeier.com/tcof/doc/
+tcof <- read_excel("data/BrowseTCOF  TcoF-DB.xlsx") %>%
+  mutate(Gene = Symbol) %>%
+  dplyr::select(c("Gene")) %>%
+  mutate(Class = "Transcription cofactor") %>%
+  distinct()
+
+## epigenes from https://epifactors.autosome.org/description
+epiGenes <- read_excel("data/EpiGenes_main.xlsx") %>%
+  mutate(Gene=HGNC_symbol) %>%
+  dplyr::select(c("Gene")) %>%
+  mutate(Class = "EpiGenes")
+
+## list of genes for transcriptional regulators
+geneList <- rbind(tf, tcof, epiGenes) %>%
+  distinct()
+
+```
+
+
+## UMAP plot for overview the relationships between tissues
+```{r}
+## umap
+dat_umap <- umap(t(ltpm))
+dat_umap <- dat_umap$layout
+dat_umap <- data.frame(rownames(dat_umap), dat_umap, check.names=F) %>%
+  setNames(., c("SAMPID", "UMAP_1", "UMAP_2")) %>%
+  left_join(sample_infor)
+
+## umap plot shows how gene expression profiles for liver samples different from other tissues
+ggplot(dat_umap, aes(UMAP_1, UMAP_2, fill=SMTS, color = SMTS)) +
+  geom_point(pch=21, alpha=1,  size = 3)  +
+  theme_classic() + 
+  theme(legend.position = 'right',
+                 text=element_text(size=12),
+                 legend.margin =margin(0,0,0,0)) +
+  scale_colour_brewer(palette = "Set3") + 
+  scale_fill_brewer(palette = "Set3") +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") 
+
+ggsave("output/umap.png", width = 6, height = 4)
+```
+
+
+## Pathway analysis
+```{r}
+## Method: 
+## Human pathways were obtained from the msigdbr package (https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html), which includes pathway collections from BIOCARTA, KEGG, REACTOME, and Gene Ontology Biological Processes (BP). These comprehensive collections encompass biological pathways and processes.
+## The pathway enrichment score for each sample was calculated using Gene Set Variation Analysis (GSVA). GSVA is a non-parametric, unsupervised method that estimates variation of pathway activity over a sample population in an expression dataset.
+## Differential pathway enrichment was performed using the Limma package. This analysis compared pathway enrichment scores between liver and non-liver samples to identify pathways that are significantly differentially enriched. 
+
+msigdbr_collections()
+h_gene_sets_H = msigdbr(species = "Homo sapiens", category = "H", subcategory = "")
+h_gene_sets_C2 = rbind(msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:BIOCARTA"),
+                      msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:KEGG"),
+                      msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME"))
+h_gene_sets_C5 = msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP")
+h_gene_sets <- rbind(h_gene_sets_H, h_gene_sets_C2, h_gene_sets_C5)
+
+h_gene_sets_tf <- h_gene_sets %>% 
+  as.data.frame() %>%
+  filter(gene_symbol %in% geneList$Gene) %>%
+  dplyr::select(c("gs_name", "gene_symbol")) %>%
+  group_by(gs_name) %>%
+  summarise(tf_gene = paste(gene_symbol, sep="", collapse = "; ")) %>%
+  setNames(., c("PATHWAY", "Transcriptional_reg"))
+
+# Use the gene sets data frame for GSVA
+# reference: https://bioconductor.org/packages/devel/bioc/vignettes/GSVA/inst/doc/GSVA.html
+msigdbr_list = split(x = h_gene_sets$gene_symbol, f = h_gene_sets$gs_name)
+msigdbr_score <- gsva(expr = as.matrix(ltpm), gset.idx.list = msigdbr_list)
+
+
+## All DEP
+design <- model.matrix(~ Grp, data=sample_infor)
+fit <- lmFit(msigdbr_score, design)
+efit <- eBayes(fit)
+  
+## Differential pathway enrichment results with transcriptional regulators in the final column.
+Res_dep <- topTable(efit, coef=2, adjust.method="BH", sort.by="none", n=Inf) %>%
+  arrange(P.Value, desc(abs(logFC))) %>%
+  rownames_to_column(., c("PATHWAY")) %>%
+  left_join(h_gene_sets_tf)
+Res_dep$PATHWAY <- factor(Res_dep$PATHWAY, levels=Res_dep$PATHWAY)
+
+write.xlsx(Res_dep, "output/Res_dep.xlsx", showNA = F)
+
+
+Res_depSig <- Res_dep %>%
+  filter(adj.P.Val < 0.05 & abs(logFC) > 0.5)
+
+dim(Res_depSig %>% filter(logFC > 0))
+dim(Res_depSig %>% filter(logFC < 0))
+
+#- volcano plot
+Res_dep$diffexpressed <- "NO"
+Res_dep$diffexpressed[Res$logFC > 0 & Res$adj.P.Val < 0.05] <- "UP"
+Res_dep$diffexpressed[Res$logFC < 0 & Res$adj.P.Val < 0.05] <- "DOWN"
+
+Res_dep$delabel <- NA
+Res_dep$delabel[Res_dep$diffexpressed != "NO"] <- as.character(Res_dep$PATHWAY[Res_dep$diffexpressed != "NO"])
+
+# plot adding up all layers we have seen so far
+ggplot(data=Res_dep, aes(x=logFC, y=-log10(P.Value), col=diffexpressed, label=delabel)) +
+  geom_point() +
+  theme_minimal() +
+  theme(axis.text.x=element_text(size = 12, color = "black"),
+        axis.text.y=element_text(size=12, color=c("black")),
+        axis.line.x = element_line(colour = "black", size=0.5),
+        axis.line.y = element_line(colour = "black", size=0.5),
+        legend.position="right") +
+  geom_text_repel() +
+  scale_color_manual(values=c("blue", "black", "red"))
+ggsave("output/volcanoPlot.png", width = 10, height = 5)
+
+
+
+Res_depSig$PATHWAY <- factor(Res_depSig$PATHWAY, levels=Res_depSig$PATHWAY)
+
+## Plot top HALLMARK pathways
+ggplot(Res_dep %>% filter(str_detect(PATHWAY, "HALLMARK")), aes(x = PATHWAY, y = logFC)) + 
+  geom_point(aes(size = logFC, color = logFC)) +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x=element_text(angle = 90, vjust = 0.5, size = 12, hjust = 1, color = "black"),
+        axis.text.y=element_text(size=12, color=c("black")),
+        axis.line.x = element_line(colour = "black", size=0.5),
+        axis.line.y = element_line(colour = "black", size=0.5),
+        legend.position="right") +
+  scale_colour_gradient(limits=c(-0.4, 0.7), low = "blue", high = "red") +
+  coord_flip()
+ggsave("output/Hallmark_pathway.png", width = 10, height = 8)
+
+## Plot top sig pathways
+ggplot(Res_depSig[1:30, ], aes(x = PATHWAY, y = logFC)) + 
+  geom_point(aes(size = logFC, color = logFC)) +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x=element_text(angle = 90, vjust = 0.5, size = 12, hjust = 1, color = "black"),
+        axis.text.y=element_text(size=12, color=c("black")),
+        axis.line.x = element_line(colour = "black", size=0.5),
+        axis.line.y = element_line(colour = "black", size=0.5),
+        legend.position="right") +
+  scale_colour_gradient(limits=c(0.7, 1.1), low = "blue", high = "red") +
+  coord_flip()
+ggsave("output/top_pathway.png", width = 12, height = 6)
+
+
+```
+
+
+## Putative transcriptional regulators
+```{r}
+## get gene summary
+tb = loadGeneSummary(organism = 9606, status = "reviewed")
+dim(tb)
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL", host="https://www.ensembl.org")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+view(listAttributes(mart = mart))
+
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    "hgnc_symbol",
+    "entrezgene_id"),
+    filter = "entrezgene_id",
+  values = tb$Gene_ID,
+  uniqueRows=TRUE)
+
+GeneSumm <- tb %>%
+  rename(entrezgene_id = Gene_ID) %>%
+  left_join(annotLookup) %>%
+  filter(!is.na(hgnc_symbol)) %>%
+  filter(hgnc_symbol != "") %>%
+  dplyr::select(c("hgnc_symbol", "Gene_summary")) %>%
+  distinct() %>%
+  setNames(., c("Gene", "Gene_summary"))
+
+
+## get protein annotation
+uniprot <- fread("data/uniprot_download_2024.07.04.tsv") %>%
+  as.data.frame() %>%
+  dplyr::select(c("Gene Names (primary)", "Entry Name", "Protein names", "Function [CC]", "Gene Ontology (GO)")) %>%
+  setNames(., c("Gene", "Entry Name", "Protein names", "Function [CC]", "Gene Ontology (GO)"))
+
+## annotate tf
+Res_depSig_tf <- data.frame(unique(strsplit(paste(na.omit((Res_depSig %>% filter(logFC > 0))[1:30, ]$Transcriptional_reg), sep="", collapse = "; "), split = "; ")[[1]])) %>%
+  setNames(., c("Gene")) %>%
+  left_join(uniprot) %>%
+  left_join(GeneSumm)
+write.xlsx(Res_depSig_tf, "output/Res_depSig_tf.xlsx", showNA = F)
+
+Res_depSig_tf_all <- data.frame(unique(strsplit(paste(na.omit((Res_depSig %>% filter(logFC > 0))$Transcriptional_reg), sep="", collapse = "; "), split = "; ")[[1]])) %>%
+  setNames(., c("Gene")) %>%
+  left_join(uniprot) %>%
+  left_join(GeneSumm)
+write.xlsx(Res_depSig_tf_all, "output/Res_depSig_tf_all.xlsx", showNA = F)
+```
+

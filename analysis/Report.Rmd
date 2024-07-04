@@ -1,0 +1,87 @@
+---
+title: "Report"
+output: html_document
+date: "2024-07-04"
+fontsize: 12pt
+geometry: left=0in,right=0in,top=0.25in,bottom=0.5in
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 100% !important;
+  margin-left: 0;
+  margin-right: 0;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(RColorBrewer)
+library(ggplot2)
+library(knitr)
+```
+
+## Report {.tabset}
+
+### Instruction
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+print("Task: Using the publicly available bulk RNA-Seq data from GTEX (v8), identify biological pathways/processes specific to the liver. As what constitutes a biological pathway/process is open for interpretation, please use your preferred method / definition / approach (or multiple). For bonus points, identify putative transcriptional regulators of these pathways/processes. To ensure that you do not encounter memory issues please restrict your analyses to protein-coding genes and the following tissues: heart, kidney, liver, lung, muscle, pancreas, spleen, stomach, pituitary gland, and thyroid.")
+
+print("Data: GTEX RNAseq TPM data and sample information are downloaded from https://www.gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression. Putative transcriptional regulators contain three parts: Transcription factors are obtained from https://pubmed.ncbi.nlm.nih.gov/29425488/. Transcription cofactors are obtained from https://tools.sschmeier.com/tcof/doc/. Epigenes are obtained from https://epifactors.autosome.org/description.")
+
+print("Method: To identify liver-specific pathways, look for pathways that are significantly enriched in liver samples compared to non-liver samples. Human pathways were obtained from the msigdbr package (https://cran.r-project.org/web/packages/msigdbr/vignettes/msigdbr-intro.html), which includes pathway collections from BIOCARTA, KEGG, REACTOME, and Gene Ontology Biological Processes (BP). These comprehensive collections encompass biological pathways and processes. The pathway enrichment score for each sample was calculated using Gene Set Variation Analysis (GSVA). GSVA is a non-parametric, unsupervised method that estimates variation of pathway activity over a sample population in an expression dataset. Differential pathway enrichment was performed using the Limma package. This analysis compared pathway enrichment scores between liver and non-liver samples to identify pathways that are significantly differentially enriched. Significant pathways were selected using cutoff: adj.P.Val < 0.05 & abs(logFC) > 0.5. Putative transcriptional regulators were identified in each pathway by intersecting the combined transcriptional regulator list with genes in each pathway.")
+```
+
+### Data overview
+
+```{r, echo=FALSE, out.width = '80%'}
+print("Liver samples: 226; Non-liver samples: 4,195")
+knitr::include_graphics("output/sample_infor_summary.png")
+```
+
+```{r umap, echo=FALSE, out.width = '80%'} 
+print("The gene expression profiles of liver samples are different from other tissues.")
+knitr::include_graphics("output/umap.png")
+```
+
+### Pathway enrichment analysis
+
+```{r volcanoPlot, echo=FALSE, out.width = '100%'}
+print("Out of 9,798 pathways, 571 are enriched in liver tissue, 218 are depleted in liver tissue.")
+knitr::include_graphics("output/volcanoPlot.png")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dat <- read_excel("output/Res_dep.xlsx")
+
+print("Pathway enrichment analysis results: ")
+
+DT::datatable(dat, rownames = FALSE, filter = 'top', escape = FALSE, 
+    options = list( scrollX = TRUE,  autoWidth=TRUE, pageLength = 15,
+                    columnDefs = list(list(className = 'dt-center', targets="_all"))))
+
+```
+
+```{r top_pathway, echo=FALSE, out.width = '80%'} 
+print("For enriched pathways, most of them are related to tyrosine catabolism, metabolism and bile acid biosynthesis.")
+knitr::include_graphics("output/top_pathway.png")
+```
+
+```{r Hallmark_pathway, echo=FALSE, out.width = '80%'} 
+print("Out of 50 hallmark pathways, 3 pathways are significantly enriched in liver samples compared to non-liver samples, HALLMARK_BILE_ACID_METABOLISM, HALLMARK_XENOBIOTIC_METABOLISM, and HALLMARK_PEROXISOME. ")
+knitr::include_graphics("output/Hallmark_pathway.png")
+```
+
+### Putative transcriptional regulators of liver-specific pathways
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+dat <- read_excel("output/Res_depSig_tf_all.xlsx")
+
+DT::datatable(dat, rownames = FALSE, filter = 'top', escape = FALSE, 
+    options = list( scrollX = TRUE,  autoWidth=TRUE, pageLength = 15,
+                    columnDefs = list(list(className = 'dt-center', targets="_all"))))
+
+```
+
